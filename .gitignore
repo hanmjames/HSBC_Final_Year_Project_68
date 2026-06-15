@@ -1,0 +1,5 @@
+jpm_data_2022_january/
+__pycache__/
+.venv/
+*.npy
+*.parquet

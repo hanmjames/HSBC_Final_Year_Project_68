@@ -12,15 +12,15 @@ import torch.nn as nn
 np.random.seed(0)
 torch.manual_seed(0)
 
-folder_name = "jpm_data_2022_january"
+folder_name = "/scratch0/hanjames"
 
 message_files = []
 order_files = []
 
 for file in sorted(os.listdir(folder_name)):
-    if file.endswith("_message_10.csv") and file.startswith("JPM_2022-01"):
+    if file.endswith("_message_10.csv") and file.startswith("JPM_2025"):
         message_files.append(file)
-    elif file.endswith("_orderbook_10.csv") and file.startswith("JPM_2022-01"):
+    elif file.endswith("_orderbook_10.csv") and file.startswith("JPM_2025"):
         order_files.append(file)
 
 print(f"Total files loaded in message file: {len(message_files)}")
@@ -35,7 +35,7 @@ z_values = []
 delta_values = []
 
 lstm_lookback_window = 50
-theta = 3
+theta = 4
 
 def create_lstm_sequences(data, lookback_window):
     sequences = []
@@ -59,6 +59,7 @@ class LSTMModel(nn.Module):
         return out
 
 for msg_file, ord_file in zip(message_files, order_files):
+    torch.cuda.empty_cache()
     jpm_message_file = pd.read_csv(os.path.join(folder_name, msg_file), header=None, low_memory=False)
     jpm_order_file = pd.read_csv(os.path.join(folder_name, ord_file), header=None, low_memory=False)
 
@@ -73,42 +74,62 @@ for msg_file, ord_file in zip(message_files, order_files):
 
     jpm_log_returns = np.log(jpm_mid_price / jpm_mid_price.shift(1)).dropna()
     jpm_log_returns = jpm_log_returns[jpm_log_returns != 0].reset_index(drop=True)
+    if len(jpm_log_returns) == 0:
+        print(f"Skipping {msg_file} because no non-zero returns")
+        continue
     all_mid_prices_nonzero.append(jpm_mid_price.iloc[jpm_log_returns.index])
 
     lstm_training_data = jpm_log_returns[:int(len(jpm_log_returns) * 0.8)]
     lstm_testing_data = jpm_log_returns[int(len(jpm_log_returns) * 0.8):]
 
-    model = LSTMModel(input_size=1, hidden_size=20, num_layers=1, output_size=1)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = LSTMModel(input_size=1, hidden_size=50, num_layers=1, output_size=1).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     lstm_sequences = create_lstm_sequences(lstm_training_data.values, lstm_lookback_window)
     lstm_targets = lstm_training_data.values[lstm_lookback_window:]
-    X_train = torch.FloatTensor(lstm_sequences).unsqueeze(-1)
-    y_train = torch.FloatTensor(lstm_targets).unsqueeze(-1)
+    X_train = torch.FloatTensor(lstm_sequences).unsqueeze(-1).to(device)
+    y_train = torch.FloatTensor(lstm_targets).unsqueeze(-1).to(device)
 
-    num_epochs = 3
+    num_epochs = 10
+    dataset = torch.utils.data.TensorDataset(X_train, y_train)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size = 512, shuffle = False)
+    best_loss = float('inf')
+    patience = 3
+    no_improvement = 0
     for epoch in range(num_epochs):
         model.train()
-        optimizer.zero_grad()
-        outputs = model(X_train)
-        loss = criterion(outputs, y_train)
-        loss.backward()
-        optimizer.step()
+        epoch_loss = 0
+        for X_batch, y_batch in dataloader:
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        avg_loss = epoch_loss / len(dataloader)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            no_improvement = 0
+        else:
+             no_improvement += 1
+        if no_improvement >= patience:
+            break
 
         if epoch == num_epochs - 1:
-            print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.6f}")
+            print(f"Final Epoch [{epoch + 1}], Avg Loss: {avg_loss:.8f}")
 
     model.eval()
     lstm_testing_sequences = create_lstm_sequences(lstm_testing_data.values, lstm_lookback_window)
-    X_test = torch.FloatTensor(lstm_testing_sequences).unsqueeze(-1)
-    y_test = torch.FloatTensor(lstm_testing_data.values[lstm_lookback_window:]).unsqueeze(-1)
+    X_test = torch.FloatTensor(lstm_testing_sequences).unsqueeze(-1).to(device)
+    y_test = torch.FloatTensor(lstm_testing_data.values[lstm_lookback_window:]).unsqueeze(-1).to(device)
     lstm_preds = model(X_test)
     lstm_residuals = y_test - lstm_preds.detach()
     lstm_residuals_standardized = (lstm_residuals - lstm_residuals.mean()) / lstm_residuals.std()
 
     jpm_jump_flag = (lstm_residuals_standardized.abs().squeeze() > theta).int()
-    jpm_jump_indices = torch.where(jpm_jump_flag == 1)[0].numpy()
+    jpm_jump_indices = torch.where(jpm_jump_flag == 1)[0].cpu().numpy()
     jpm_total_ticks_per_day = len(jpm_log_returns)
 
     min_gap = 10
@@ -130,7 +151,7 @@ for msg_file, ord_file in zip(message_files, order_files):
             z_values.append(jpm_total_ticks_per_day - tick)
             delta_values.append(0)
 
-    all_jump_flags.append(pd.Series(jpm_jump_flag.numpy()))
+    all_jump_flags.append(pd.Series(jpm_jump_flag.cpu().numpy()))
     all_mid_prices.append(jpm_mid_price)
     all_log_returns.append(jpm_log_returns)
     all_timestamps.append(jpm_message_file[0][jpm_log_returns.index])
@@ -162,5 +183,5 @@ print(survival_labels.head(20))
 print(survival_labels.describe())
 print(f"Censored observations: {(survival_labels['delta'] == 0).sum()}")
 print(f"Observed observations: {(survival_labels['delta'] == 1).sum()}")
-survival_labels.to_csv('jpm_lstm_residual_labels_january_2022.csv', index=False)
+survival_labels.to_csv('jpm_lstm_residual_labels_january_2025_h1.csv', index=False)
 print("Saved LSTM residual survival labels.")

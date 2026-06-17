@@ -6,15 +6,15 @@ import warnings
 warnings.filterwarnings("ignore")
 import math
 
-folder_name = "jpm_data_2022_january"
+folder_name = "/scratch0/hanjames"
 
 message_files = []
 order_files = []
 
 for file in sorted(os.listdir(folder_name)):
-    if file.endswith("_message_10.csv") and file.startswith("JPM_2022-01"):
+    if file.endswith("_message_10.csv") and file.startswith("JPM_2025"):
         message_files.append(file)
-    elif file.endswith("_orderbook_10.csv") and file.startswith("JPM_2022-01"):
+    elif file.endswith("_orderbook_10.csv") and file.startswith("JPM_2025"):
         order_files.append(file)
 
 print(f"Total files loaded in message file: {len(message_files)}")
@@ -46,6 +46,9 @@ for msg_file, ord_file in zip(message_files, order_files):
 
     jpm_log_returns = np.log(jpm_mid_price / jpm_mid_price.shift(1)).dropna()
     jpm_log_returns = jpm_log_returns[jpm_log_returns != 0].reset_index(drop=True)
+    if len(jpm_log_returns) == 0:
+        print(f"Skipping {msg_file} because no non-zero returns")
+        continue
     all_mid_prices_nonzero.append(jpm_mid_price.iloc[jpm_log_returns.index])
 
     n_obs = len(jpm_log_returns)
@@ -122,5 +125,5 @@ print(survival_labels.describe())
 print(f"Censored observations: {(survival_labels['delta'] == 0).sum()}")
 print(f"Observed observations: {(survival_labels['delta'] == 1).sum()}")
 
-survival_labels.to_csv('jpm_lm_survival_labels_january_2022.csv', index=False)
+survival_labels.to_csv('jpm_lm_survival_labels_january_2025_h1.csv', index=False)
 print("Saved LM survival labels.")

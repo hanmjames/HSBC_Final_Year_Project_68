@@ -20,7 +20,7 @@ class LOBDataset(torch.utils.data.Dataset):
 class LOBPreprocessor:
     def __init__(self, stock, folder_name, window_size = 100):
         self.stock = stock
-        self.folder_name = stock + "_data_2022_january"
+        self.folder_name = folder_name
         self.window_size = window_size
         self.message_files = []
         self.order_files = []
